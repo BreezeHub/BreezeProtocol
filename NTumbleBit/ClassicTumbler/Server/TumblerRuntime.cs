@@ -16,6 +16,7 @@ using System.Text;
 using System.Net;
 using System.Threading;
 using NTumbleBit.Tor;
+using TumbleBitSetup;
 
 namespace NTumbleBit.ClassicTumbler.Server
 {
@@ -83,7 +84,8 @@ namespace NTumbleBit.ClassicTumbler.Server
 					tumblerUri.Port = result.HiddenServiceUri.Port;
 					tumblerUri.Host = result.HiddenServiceUri.Host;
 					TumblerUris.Add(tumblerUri);
-					TorUri = tumblerUri.RoutableUri;
+					TorUri = tumblerUri.GetRoutableUri(false);
+					ClassicTumblerParameters.ExpectedAddress = TorUri.AbsoluteUri;
 					Logs.Configuration.LogInformation($"Tor configured on {result.HiddenServiceUri}");
 					torConfigured = true;
 				}
@@ -105,47 +107,28 @@ namespace NTumbleBit.ClassicTumbler.Server
 			if(!torConfigured)
 				Logs.Configuration.LogWarning("The tumbler is not configured as a Tor Hidden service");
 
-			var rsaFile = Path.Combine(conf.DataDir, "Tumbler.pem");
-			if(!File.Exists(rsaFile))
-			{
-				Logs.Configuration.LogWarning("RSA private key not found, please backup it. Creating...");
-				TumblerKey = new RsaKey();
-				File.WriteAllBytes(rsaFile, TumblerKey.ToBytes());
-				Logs.Configuration.LogInformation("RSA key saved (" + rsaFile + ")");
-			}
-			else
-			{
-				Logs.Configuration.LogInformation("RSA private key found (" + rsaFile + ")");
-				TumblerKey = new RsaKey(File.ReadAllBytes(rsaFile));
-			}
 
-			var voucherFile = Path.Combine(conf.DataDir, "Voucher.pem");
-			if(!File.Exists(voucherFile))
-			{
-				Logs.Configuration.LogWarning("Creation of Voucher Key");
-				VoucherKey = new RsaKey();
-				File.WriteAllBytes(voucherFile, VoucherKey.ToBytes());
-				Logs.Configuration.LogInformation("RSA key saved (" + voucherFile + ")");
-			}
-			else
-			{
-				Logs.Configuration.LogInformation("Voucher key found (" + voucherFile + ")");
-				VoucherKey = new RsaKey(File.ReadAllBytes(voucherFile));
-			}
+			var tumlerKeyData = LoadRSAKeyData(conf.DataDir, "Tumbler.pem", conf.NoRSAProof);
+			var voucherKeyData = LoadRSAKeyData(conf.DataDir, "Voucher.pem", conf.NoRSAProof);
+			ClassicTumblerParameters.ServerKey = tumlerKeyData.Item2;
+			ClassicTumblerParameters.VoucherKey = voucherKeyData.Item2;
 
-			ClassicTumblerParameters.ServerKey = TumblerKey.PubKey;
-			ClassicTumblerParameters.VoucherKey = VoucherKey.PubKey;
-			ClassicTumblerParametersHash = ClassicTumblerParameters.GetHash();
+			TumblerKey = tumlerKeyData.Item1;
+			VoucherKey = voucherKeyData.Item1;
 
-			if(conf.AllowInsecure)
+
+			if(!conf.TorMandatory)
 			{
-				TumblerUris.Add(new TumblerUrlBuilder()
+				var httpUri = new TumblerUrlBuilder()
 				{
 					Host = LocalEndpoint.Address.ToString(),
 					Port = LocalEndpoint.Port,
-				});
+				};
+				TumblerUris.Add(httpUri);
+				if(String.IsNullOrEmpty(ClassicTumblerParameters.ExpectedAddress))
+					ClassicTumblerParameters.ExpectedAddress = httpUri.GetRoutableUri(false).AbsoluteUri;
 			}
-
+			ClassicTumblerParametersHash = ClassicTumblerParameters.GetHash();
 			var configurationHash = ClassicTumblerParameters.GetHash();
 			foreach(var uri in TumblerUris)
 			{
@@ -161,11 +144,89 @@ namespace NTumbleBit.ClassicTumbler.Server
 			}
 			Logs.Configuration.LogInformation($"--------------------------------");
 			Logs.Configuration.LogInformation("");
-			
-			Repository = conf.DBreezeRepository;
-			_Resources.Add(Repository);
-			Tracker = conf.Tracker;
-			Services = conf.Services;
+
+			var dbreeze = new DBreezeRepository(Path.Combine(conf.DataDir, "db2"));
+			Repository = dbreeze;
+			_Resources.Add(dbreeze);
+			Tracker = new Tracker(dbreeze, Network);
+			Services = ExternalServices.CreateFromRPCClient(rpcClient, dbreeze, Tracker, true);
+		}
+
+		private static Tuple<RsaKey, RSAKeyData> LoadRSAKeyData(string dataDir, string keyName, bool noRSAProof)
+		{
+			RSAKeyData data = new RSAKeyData();
+			RsaKey key = null;
+			{
+
+				var rsaFile = Path.Combine(dataDir, keyName);
+				if(!File.Exists(rsaFile))
+				{
+					Logs.Configuration.LogWarning("RSA private key not found, please backup it. Creating...");
+					key = new RsaKey();
+					File.WriteAllBytes(rsaFile, key.ToBytes());
+					Logs.Configuration.LogInformation("RSA key saved (" + rsaFile + ")");
+				}
+				else
+				{
+					Logs.Configuration.LogInformation("RSA private key found (" + rsaFile + ")");
+					key = new RsaKey(File.ReadAllBytes(rsaFile));
+				}
+			}
+
+			data.PublicKey = key.PubKey;
+
+
+			if(!noRSAProof)
+			{
+				{
+					var poupard = Path.Combine(dataDir, "ProofPoupard-" + keyName);
+					PoupardSternProof poupardProof = null;
+					if(!File.Exists(poupard))
+					{
+						Logs.Configuration.LogInformation("Creating Poupard Stern proof...");
+						poupardProof = PoupardStern.ProvePoupardStern(key._Key, RSAKeyData.PoupardSetup);
+						MemoryStream ms = new MemoryStream();
+						BitcoinStream bs = new BitcoinStream(ms, true);
+						bs.ReadWriteC(ref poupardProof);
+						File.WriteAllBytes(poupard, ms.ToArray());
+						Logs.Configuration.LogInformation("Poupard Stern proof created (" + poupard + ")");
+					}
+					else
+					{
+						Logs.Configuration.LogInformation("Poupard Stern Proof found (" + poupard + ")");
+						var bytes = File.ReadAllBytes(poupard);
+						MemoryStream ms = new MemoryStream(bytes);
+						BitcoinStream bs = new BitcoinStream(ms, false);
+						bs.ReadWriteC(ref poupardProof);
+					}
+					data.PoupardSternProof = poupardProof;
+				}
+
+				{
+					var permutation = Path.Combine(dataDir, "ProofPermutation-" + keyName);
+					PermutationTestProof permutationProof = null;
+					if(!File.Exists(permutation))
+					{
+						Logs.Configuration.LogInformation("Creating Permutation Test proof...");
+						permutationProof = PermutationTest.ProvePermutationTest(key._Key, RSAKeyData.PermutationSetup);
+						MemoryStream ms = new MemoryStream();
+						BitcoinStream bs = new BitcoinStream(ms, true);
+						bs.ReadWriteC(ref permutationProof);
+						File.WriteAllBytes(permutation, ms.ToArray());
+						Logs.Configuration.LogInformation("Permutation Test proof created (" + permutation + ")");
+					}
+					else
+					{
+						Logs.Configuration.LogInformation("Permutation Test Proof found (" + permutation + ")");
+						var bytes = File.ReadAllBytes(permutation);
+						MemoryStream ms = new MemoryStream(bytes);
+						BitcoinStream bs = new BitcoinStream(ms, false);
+						bs.ReadWriteC(ref permutationProof);
+					}
+					data.PermutationTestProof = permutationProof;
+				}
+			}
+			return Tuple.Create(key, data);
 		}
 
 		public Uri TorUri
@@ -255,6 +316,6 @@ namespace NTumbleBit.ClassicTumbler.Server
 		{
 			get;
 			set;
-		}		
+		}
 	}
 }
