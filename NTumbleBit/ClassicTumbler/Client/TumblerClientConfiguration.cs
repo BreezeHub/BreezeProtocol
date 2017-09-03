@@ -32,32 +32,6 @@ namespace NTumbleBit.ClassicTumbler.Client
 
 	public class TumblerClientConfiguration : TumblerClientConfigurationBase
 	{
-		public string ConfigurationFile
-		{
-			get;
-			set;
-		}
-
-		public RPCArgs RPCArgs
-		{
-			get; set;
-		} = new RPCArgs();
-		public bool AllowInsecure
-		{
-			get;
-			set;
-		} = false;
-		public string TorPath
-		{
-			get;
-			set;
-		}
-		public bool TorMandatory
-		{
-			get;
-			set;
-		} = true;
-
 		public TumblerClientConfiguration LoadArgs(String[] args)
 		{
 			ConfigurationFile = args.Where(a => a.StartsWith("-conf=", StringComparison.Ordinal)).Select(a => a.Substring("-conf=".Length).Replace("\"", "")).FirstOrDefault();
@@ -166,7 +140,7 @@ namespace NTumbleBit.ClassicTumbler.Client
 
 			DBreezeRepository = new DBreezeRepository(Path.Combine(DataDir, "db2"));
 			Tracker = new Tracker(DBreezeRepository, Network);
-			Services = ExternalServices.CreateFromRPCClient(rpc, DBreezeRepository, Tracker);
+			Services = ExternalServices.CreateFromRPCClient(rpc, DBreezeRepository, Tracker, true);
 
 			if (OutputWallet.RootKey != null && OutputWallet.KeyPath != null)
 				DestinationWallet = new ClientDestinationWallet(OutputWallet.RootKey, OutputWallet.KeyPath, DBreezeRepository, Network);
